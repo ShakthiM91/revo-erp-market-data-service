@@ -76,6 +76,7 @@ class CSEScraper extends MarketDataProvider {
     );
     const date =
       row.date ?? row.tradeDate ?? row.lastTradedDate ?? new Date().toISOString().slice(0, 10);
+      const nowprice = this._parseNum(row.lastTradedPrice);
 
     if (close == null || isNaN(close)) return null;
 
@@ -88,7 +89,8 @@ class CSEScraper extends MarketDataProvider {
       volume: Number(volume) || undefined,
       change: change != null ? Number(change) : undefined,
       pChange: pChange != null ? Number(pChange) : undefined,
-      date: String(date).slice(0, 10)
+      date: String(date).slice(0, 10),
+      nowprice: nowprice != null ? Number(nowprice) : undefined
     };
   }
 
