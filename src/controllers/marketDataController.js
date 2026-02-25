@@ -92,44 +92,56 @@ async function getHistory(req, res, next) {
   }
 }
 
+/**
+ * Run price refresh for given tickers (or all tracked from holdings).
+ * Shared by HTTP POST /refresh and by cron Redis subscriber.
+ * @param {string[]} [tickers] - Optional list; if empty, loads from revo_equity_holdings
+ * @returns {{ refreshed: number, tickers: string[] }}
+ */
+async function runPriceRefresh(tickers = null) {
+  let list = Array.isArray(tickers) ? tickers : null;
+  if (!list || list.length === 0) {
+    const [rows] = await equityDb.query(
+      `SELECT DISTINCT s.ticker FROM revo_equity_holdings h
+       INNER JOIN revo_equity_symbols s ON h.symbol_id = s.id
+       WHERE h.quantity > 0`
+    );
+    list = rows.map((r) => r.ticker);
+  }
+
+  if (list.length === 0) {
+    return { refreshed: 0, tickers: [] };
+  }
+
+  const prices = await provider.getPrices(list);
+  const ttl = getCacheTTL();
+
+  for (const p of prices) {
+    if (!p) continue;
+    await PriceModel.upsert({
+      symbol_ticker: p.ticker,
+      price_date: p.date,
+      open_price: p.open,
+      high_price: p.high,
+      low_price: p.low,
+      close_price: p.close,
+      volume: p.volume,
+      change_amount: p.change,
+      change_pct: p.pChange
+    });
+    if (redisClient && isRedisEnabled()) {
+      await redisClient.setex(CACHE_PREFIX + p.ticker, ttl, JSON.stringify(p));
+    }
+  }
+
+  return { refreshed: prices.length, tickers: list };
+}
+
 async function refresh(req, res, next) {
   try {
-    let tickers = req.body?.tickers;
-    if (!tickers || !Array.isArray(tickers) || tickers.length === 0) {
-      const [rows] = await equityDb.query(
-        `SELECT DISTINCT s.ticker FROM revo_equity_holdings h
-         INNER JOIN revo_equity_symbols s ON h.symbol_id = s.id
-         WHERE h.quantity > 0`
-      );
-      tickers = rows.map((r) => r.ticker);
-    }
-
-    if (tickers.length === 0) {
-      return res.json({ success: true, data: { refreshed: 0, tickers: [] } });
-    }
-
-    const prices = await provider.getPrices(tickers);
-    const ttl = getCacheTTL();
-
-    for (const p of prices) {
-      if (!p) continue;
-      await PriceModel.upsert({
-        symbol_ticker: p.ticker,
-        price_date: p.date,
-        open_price: p.open,
-        high_price: p.high,
-        low_price: p.low,
-        close_price: p.close,
-        volume: p.volume,
-        change_amount: p.change,
-        change_pct: p.pChange
-      });
-      if (redisClient && isRedisEnabled()) {
-        await redisClient.setex(CACHE_PREFIX + p.ticker, ttl, JSON.stringify(p));
-      }
-    }
-
-    res.json({ success: true, data: { refreshed: prices.length, tickers: tickers } });
+    const tickers = req.body?.tickers;
+    const result = await runPriceRefresh(tickers);
+    res.json({ success: true, data: result });
   } catch (err) {
     next(err);
   }
@@ -148,5 +160,6 @@ module.exports = {
   getPrice,
   getHistory,
   refresh,
-  getSymbols
+  getSymbols,
+  runPriceRefresh
 };

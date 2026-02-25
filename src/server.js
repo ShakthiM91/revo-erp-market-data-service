@@ -5,6 +5,7 @@ const morgan = require('morgan');
 require('dotenv').config();
 
 require('./config/redis');
+const { initCronSubscriber } = require('./cron/cronSubscriber');
 
 const app = express();
 const PORT = process.env.PORT || 3011;
@@ -41,6 +42,7 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Market Data Service running on port ${PORT}`);
+  initCronSubscriber();
 });
 
 module.exports = app;
