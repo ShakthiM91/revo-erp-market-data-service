@@ -6,6 +6,11 @@ const { getCacheTTL } = require('../utils/marketHours');
 
 const CACHE_PREFIX = 'mktdata:price:';
 
+function isValidTradePrice(v) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) && n > 0;
+}
+
 async function getPrice(req, res, next) {
   try {
     const { ticker } = req.params;
@@ -17,15 +22,20 @@ async function getPrice(req, res, next) {
     if (redisClient && isRedisEnabled()) {
       const cached = await redisClient.get(cacheKey);
       if (cached) {
-        return res.json({ success: true, data: JSON.parse(cached) });
+        const parsed = JSON.parse(cached);
+        if (isValidTradePrice(parsed?.close)) {
+          return res.json({ success: true, data: parsed });
+        }
+        await redisClient.del(cacheKey);
       }
     }
 
     const dbLatest = await PriceModel.getLatest(normalized);
     if (dbLatest) {
+      const closeNum = parseFloat(dbLatest.close_price);
       const data = {
         ticker: dbLatest.symbol_ticker,
-        close: parseFloat(dbLatest.close_price),
+        close: closeNum,
         open: dbLatest.open_price != null ? parseFloat(dbLatest.open_price) : undefined,
         high: dbLatest.high_price != null ? parseFloat(dbLatest.high_price) : undefined,
         low: dbLatest.low_price != null ? parseFloat(dbLatest.low_price) : undefined,
@@ -34,7 +44,7 @@ async function getPrice(req, res, next) {
         pChange: dbLatest.change_pct != null ? parseFloat(dbLatest.change_pct) : undefined,
         date: dbLatest.price_date
       };
-      if (redisClient && isRedisEnabled()) {
+      if (redisClient && isRedisEnabled() && isValidTradePrice(closeNum)) {
         const ttl = getCacheTTL();
         await redisClient.setex(cacheKey, ttl, JSON.stringify(data));
       }
@@ -43,6 +53,9 @@ async function getPrice(req, res, next) {
 
     const price = await provider.getPrice(normalized);
     if (!price) return res.status(404).json({ error: 'Price not found', ticker: normalized });
+    if (!isValidTradePrice(price.close)) {
+      return res.status(404).json({ error: 'Price not available', ticker: normalized });
+    }
 
     await PriceModel.upsert({
       symbol_ticker: normalized,
@@ -118,6 +131,13 @@ async function runPriceRefresh(tickers = null) {
 
   for (const p of prices) {
     if (!p) continue;
+    if (!isValidTradePrice(p.close)) {
+      console.warn('[MarketData] skip upsert: non-positive close for', p.ticker, p.close);
+      if (redisClient && isRedisEnabled()) {
+        await redisClient.del(CACHE_PREFIX + p.ticker);
+      }
+      continue;
+    }
     await PriceModel.upsert({
       symbol_ticker: p.ticker,
       price_date: p.date,

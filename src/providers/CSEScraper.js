@@ -60,10 +60,36 @@ class CSEScraper extends MarketDataProvider {
    * Normalize CSE reqSymbolInfo to our price shape.
    * CSE fields: closingPrice, previousClose, hiTrade, lowTrade, tdyShareVolume, change, changePercentage.
    */
+  /**
+   * First strictly positive numeric among named fields (order matters).
+   * CSE may send closingPrice: 0 while lastTradedPrice is valid; `??` would wrongly keep 0.
+   */
+  _firstPositiveField(row, keys) {
+    for (const k of keys) {
+      if (row[k] == null || row[k] === '') continue;
+      const n = this._parseNum(row[k]);
+      if (n != null && !Number.isNaN(n) && n > 0) return n;
+    }
+    return null;
+  }
+
   _normalize(row, ticker) {
-    const close = this._parseNum(
-      row.closingPrice ?? row.close ?? row.last ?? row.price ?? row.lastTradedPrice ?? row.lastPrice
-    );
+    const close =
+      this._firstPositiveField(row, [
+        'lastTradedPrice',
+        'lastPrice',
+        'last',
+        'price',
+        'closingPrice',
+        'close'
+      ]) ??
+      this._firstPositiveField(row, [
+        'previousClose',
+        'prevClose',
+        'open',
+        'openPrice',
+        'previousPrice'
+      ]);
     const open = this._parseNum(
       row.previousClose ?? row.open ?? row.previousPrice ?? row.openPrice ?? row.prevClose
     );
@@ -76,9 +102,10 @@ class CSEScraper extends MarketDataProvider {
     );
     const date =
       row.date ?? row.tradeDate ?? row.lastTradedDate ?? new Date().toISOString().slice(0, 10);
-      const nowprice = this._parseNum(row.lastTradedPrice);
+    const ltp = this._parseNum(row.lastTradedPrice);
+    const nowprice = ltp != null && ltp > 0 ? Number(ltp) : undefined;
 
-    if (close == null || isNaN(close)) return null;
+    if (close == null || Number.isNaN(close)) return null;
 
     return {
       ticker,
