@@ -1,6 +1,6 @@
 /**
  * Subscribes to cron:module:market-data for Redis pub/sub job execution.
- * When action is refreshPrices, runs runPriceRefresh() and publishes result to cron:execution:{id}.
+ * When action is refreshPrices, runs runPriceRefresh() (which upserts prices and holding snapshots), then publishes result to cron:execution:{id}.
  * Requires a dedicated Redis connection for subscription (subscription blocks the connection).
  */
 
@@ -92,8 +92,15 @@ function initCronSubscriber() {
 
     try {
       const result = await runPriceRefresh();
-      publishResult(executionId, 'completed', result, null);
-      console.log('[MarketData Cron] refreshPrices completed:', result.refreshed, 'prices');
+      const { priceMap: _pm, ...rest } = result;
+      publishResult(executionId, 'completed', rest, null);
+      console.log(
+        '[MarketData Cron] refreshPrices completed:',
+        result.refreshed,
+        'prices,',
+        result.snapshotted ?? 0,
+        'snapshots'
+      );
     } catch (err) {
       console.error('[MarketData Cron] refreshPrices failed:', err.message);
       publishResult(executionId, 'failed', null, err.message || 'Refresh failed');

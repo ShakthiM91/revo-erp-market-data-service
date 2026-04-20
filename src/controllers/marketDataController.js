@@ -3,6 +3,7 @@ const PriceModel = require('../models/priceModel');
 const equityDb = require('../config/equityDatabase');
 const { client: redisClient, isRedisEnabled } = require('../config/redis');
 const { getCacheTTL } = require('../utils/marketHours');
+const { runHoldingSnapshot } = require('../services/holdingSnapshotWriter');
 
 const CACHE_PREFIX = 'mktdata:price:';
 
@@ -109,9 +110,11 @@ async function getHistory(req, res, next) {
  * Run price refresh for given tickers (or all tracked from holdings).
  * Shared by HTTP POST /refresh and by cron Redis subscriber.
  * @param {string[]} [tickers] - Optional list; if empty, loads from revo_equity_holdings
- * @returns {{ refreshed: number, tickers: string[] }}
+ * @returns {{ refreshed: number, tickers: string[], priceMap: Record<string, number>, snapshotDate: string, snapshotted: number }}
  */
 async function runPriceRefresh(tickers = null) {
+  const snapshotDateFallback = new Date().toISOString().slice(0, 10);
+
   let list = Array.isArray(tickers) ? tickers : null;
   if (!list || list.length === 0) {
     const [rows] = await equityDb.query(
@@ -123,11 +126,15 @@ async function runPriceRefresh(tickers = null) {
   }
 
   if (list.length === 0) {
-    return { refreshed: 0, tickers: [] };
+    return { refreshed: 0, tickers: [], priceMap: {}, snapshotDate: snapshotDateFallback, snapshotted: 0 };
   }
 
   const prices = await provider.getPrices(list);
   const ttl = getCacheTTL();
+  /** @type {Record<string, number>} */
+  const priceMap = {};
+  let snapshotDate = snapshotDateFallback;
+  let refreshed = 0;
 
   for (const p of prices) {
     if (!p) continue;
@@ -152,16 +159,34 @@ async function runPriceRefresh(tickers = null) {
     if (redisClient && isRedisEnabled()) {
       await redisClient.setex(CACHE_PREFIX + p.ticker, ttl, JSON.stringify(p));
     }
+    const key = String(p.ticker || '').trim().toUpperCase();
+    priceMap[key] = Number(p.close);
+    if (p.date && typeof p.date === 'string') snapshotDate = p.date.slice(0, 10);
+    refreshed += 1;
   }
 
-  return { refreshed: prices.length, tickers: list };
+  let snapshotted = 0;
+  if (Object.keys(priceMap).length > 0) {
+    try {
+      snapshotted = await runHoldingSnapshot(priceMap, snapshotDate);
+      if (snapshotted > 0) {
+        console.log('[MarketData] holding snapshots upserted:', snapshotted, 'as of', snapshotDate);
+      }
+    } catch (e) {
+      console.error('[MarketData] runHoldingSnapshot failed:', e.message);
+      if (e.stack) console.error(e.stack);
+    }
+  }
+
+  return { refreshed, tickers: list, priceMap, snapshotDate, snapshotted };
 }
 
 async function refresh(req, res, next) {
   try {
     const tickers = req.body?.tickers;
     const result = await runPriceRefresh(tickers);
-    res.json({ success: true, data: result });
+    const { priceMap: _pm, ...data } = result;
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }
